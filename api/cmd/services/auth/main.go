@@ -13,7 +13,9 @@ import (
 	"time"
 
 	"github.com/ardanlabs/conf/v3"
+	"github.com/dubey22rohit/togo-service/api/cmd/services/auth/build/all"
 	"github.com/dubey22rohit/togo-service/api/sdk/http/debug"
+	"github.com/dubey22rohit/togo-service/api/sdk/http/mux"
 	"github.com/dubey22rohit/togo-service/foundation/logger"
 )
 
@@ -149,16 +151,27 @@ func run(ctx context.Context, log *logger.Logger) error {
 	shutdown := make(chan os.Signal, 1)
 	signal.Notify(shutdown, syscall.SIGTERM, syscall.SIGINT)
 
-	/*
-		TODO: Make cfgMux and http server
-	*/
+	cfgMux := mux.Config{
+		Build: build,
+		Log:   log,
+		// DB:db,
+		Tracer: nil,
+	}
+
+	api := http.Server{
+		Addr:         config.Web.APIHost,
+		Handler:      mux.WebAPI(cfgMux, all.Routes(), mux.WithCORS(config.Web.CORSAllowedOrigins)),
+		ReadTimeout:  config.Web.ReadTimeout,
+		WriteTimeout: config.Web.WriteTimeout,
+		IdleTimeout:  config.Web.IdleTimeout,
+		ErrorLog:     logger.NewStdLogger(log, logger.LevelError),
+	}
 
 	serverErrors := make(chan error, 1)
 
 	go func() {
 		log.Info(ctx, "startup", "status", "api router started", "host", nil)
-		// serverErrors <- api.ListenAndServe()
-
+		serverErrors <- api.ListenAndServe()
 	}()
 
 	select {
@@ -174,6 +187,14 @@ func run(ctx context.Context, log *logger.Logger) error {
 	case sig := <-shutdown:
 		log.Info(ctx, "shutdown", "status", "shutdown started", "signal", sig)
 		defer log.Info(ctx, "shutdown", "status", "shutdown complete", "signal", sig)
+
+		ctx, cancel := context.WithTimeout(ctx, config.Web.ShutdownTimeout)
+		defer cancel()
+
+		if err := api.Shutdown(ctx); err != nil {
+			api.Close()
+			return fmt.Errorf("could not stop server gracefully: %w", err)
+		}
 	}
 
 	return nil
